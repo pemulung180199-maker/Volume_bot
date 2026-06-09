@@ -11,7 +11,6 @@ Kondisi:
 """
 
 import requests
-import json
 import time
 from datetime import datetime, timezone
 
@@ -26,10 +25,7 @@ REQUEST_DELAY        = 0.3           # Jeda antar request (detik)
 # ─── HELPER FUNCTIONS ────────────────────────────────────────────────────────────
 
 def get_tickers() -> dict:
-    """
-    Ambil semua ticker sekaligus.
-    Return: { symbol: {"vol24h": float, "last_price": float} }
-    """
+    """Ambil semua ticker sekaligus."""
     url = f"{BASE_URL}/v5/market/tickers"
     params = {"category": CATEGORY}
     try:
@@ -50,8 +46,10 @@ def get_tickers() -> dict:
 
 def get_klines(symbol: str, limit: int = 3) -> list | None:
     """
-    Ambil data OHLCV terbaru.
-    Urutan descending: index 0 = candle berjalan, 1 = closed terbaru, 2 = sebelumnya
+    Ambil data OHLCV terbaru dari Bybit.
+    Indeks 0 = Candle berjalan (belum closed)
+    Indeks 1 = Candle tertutup terbaru (N-1)
+    Indeks 2 = Candle tertutup sebelumnya (N-2)
     """
     url = f"{BASE_URL}/v5/market/kline"
     params = {
@@ -81,27 +79,24 @@ def parse_candle(raw: list) -> dict:
         "low"     : float(raw[3]),
         "close"   : float(raw[4]),
         "volume"  : float(raw[5]),
-        "turnover": float(raw[6]),   # nilai USD
+        "turnover": float(raw[6]),   # Nilai nominal transaksi dalam USD
         "is_green": float(raw[4]) >= float(raw[1]),
     }
 
 
 def analyze_symbol(symbol: str) -> dict | None:
-    """
-    Analisis pola dua candle terakhir yang sudah closed.
-    Tidak ada batasan volume per candle — hanya pola + kenaikan volume relatif.
-    """
+    """Analisis pola dua candle terakhir yang sudah closed (Indeks 2 dan Indeks 1)."""
     klines = get_klines(symbol, limit=3)
     if not klines or len(klines) < 3:
         return None
 
-    # index 2 = N-2 (lebih lama), index 1 = N-1 (terbaru closed)
-    prev2 = parse_candle(klines[2])
-    prev1 = parse_candle(klines[1])
+    # Mengabaikan klines[0] karena merupakan candle yang sedang berjalan.
+    prev2 = parse_candle(klines[2]) # Candle terlama (N-2)
+    prev1 = parse_candle(klines[1]) # Candle terbaru yang sudah closed (N-1)
 
-    # Hitung perubahan volume antar dua candle
     if prev2["turnover"] == 0:
         return None
+        
     vol_change = (prev1["turnover"] - prev2["turnover"]) / prev2["turnover"]
 
     # ─── LOGIKA SINYAL ─────────────────────────────────────────────────────────
@@ -126,7 +121,7 @@ def analyze_symbol(symbol: str) -> dict | None:
         signal = "SELL 📉"
         reason = f"Merah → Merah | Volume naik {vol_change*100:.1f}%"
     else:
-        return None   # Pola tidak memenuhi syarat
+        return None   # Tidak memenuhi kriteria dasar kenaikan volume atau kesamaan warna
 
     return {
         "symbol"    : symbol,
@@ -159,23 +154,20 @@ def main():
     print(f"  Scan Time : {scan_time}")
     print("=" * 65)
 
-    # 1. Ambil semua ticker sekaligus (efisien, 1 request)
     print("\n⏳ Mengambil data ticker...")
     tickers = get_tickers()
     print(f"   Total koin ditemukan: {len(tickers)}")
 
-    # 2. Filter: hanya koin dengan volume 24 jam ≥ MIN_VOLUME_24H_USD
     qualified = {
         sym: info
         for sym, info in tickers.items()
         if sym.endswith("USDT") and info["vol24h"] >= MIN_VOLUME_24H_USD
     }
-    # Urutkan dari volume 24 jam tertinggi
+    
     qualified_sorted = sorted(qualified.keys(), key=lambda s: qualified[s]["vol24h"], reverse=True)
     print(f"   Koin lolos filter Vol 24j ≥ {format_usd(MIN_VOLUME_24H_USD)}: {len(qualified_sorted)} koin")
     print(f"   Memulai scan pola candle...\n")
 
-    # 3. Scan setiap simbol yang lolos filter
     buy_signals    = []
     sell_signals   = []
     cancelled_list = []
@@ -184,7 +176,6 @@ def main():
         print(f"\r   Progress: {i}/{len(qualified_sorted)} — {symbol:<20}", end="", flush=True)
         result = analyze_symbol(symbol)
         if result:
-            # Tambahkan info volume 24 jam ke result
             result["vol24h"] = qualified[symbol]["vol24h"]
             if result["cancelled"]:
                 cancelled_list.append(result)
@@ -196,7 +187,6 @@ def main():
 
     print(f"\r   ✅ Selesai memindai {len(qualified_sorted)} koin{' ' * 20}")
 
-    # ─── TAMPILKAN HASIL ────────────────────────────────────────────────────────
     print("\n" + "=" * 65)
     print("  📊 RINGKASAN HASIL")
     print("=" * 65)
@@ -230,35 +220,12 @@ def main():
 
     if cancelled_list:
         print("\n" + "─" * 65)
-        print("  ⚠️  SINYAL DIBATALKAN (Pembalikan Arah)")
+        print("  ⚠️  REVERSAL / DIBATALKAN (Pembalikan Arah Warna)")
         print("─" * 65)
         for r in cancelled_list:
-            p2, p1 = r["prev2"], r["prev1"]
-            c2 = "🟢" if p2["is_green"] else "🔴"
-            c1 = "🟢" if p1["is_green"] else "🔴"
-            print(f"\n  📌 {r['symbol']}  {c2}→{c1}  Vol 24j: {format_usd(r['vol24h'])}")
-            print(f"     {r['reason']}")
-            print(f"     Vol Candle N-2: {format_usd(p2['turnover'])}  →  N-1: {format_usd(p1['turnover'])}")
-
-    if not buy_signals and not sell_signals and not cancelled_list:
-        print("\n  ℹ️  Tidak ada sinyal yang memenuhi kriteria saat ini.")
-
-    print("\n" + "=" * 65)
-    print(f"  Scan selesai: {scan_time}")
-    print("=" * 65 + "\n")
-
-    # ─── SIMPAN KE JSON ─────────────────────────────────────────────────────────
-    output = {
-        "scan_time"   : scan_time,
-        "total_scanned": len(qualified_sorted),
-        "buy_signals" : buy_signals,
-        "sell_signals": sell_signals,
-        "cancelled"   : cancelled_list,
-    }
-    with open("signal_output.json", "w") as f:
-        json.dump(output, f, indent=2)
-    print("💾 Hasil disimpan ke signal_output.json")
-
+            # Menggunakan emoji dinamis berdasarkan kondisi lilin terakhirnya
+            emoji = "🟢" if r["prev1"]["is_green"] else "🔴"
+            print_signal(r, emoji)
 
 if __name__ == "__main__":
     main()
