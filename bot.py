@@ -44,7 +44,9 @@ def get_tickers() -> dict:
         return {}
 
 
-def get_klines(symbol: str, limit: int = 3) -> list | None:
+from typing import List, Union
+
+def get_klines(symbol: str, limit: int = 3) -> Union[List, None]:
     """
     Ambil data OHLCV terbaru dari Bybit.
     Indeks 0 = Candle berjalan (belum closed)
